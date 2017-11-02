@@ -356,7 +356,7 @@ void set_timer(int second)
 
 void signal_handler(int m)
 {
-    std::cout << "in timer" << std::endl;
+
 }
 
 //void matchFilter(std::vector<cv::DMatch>& m) {
@@ -371,6 +371,128 @@ void signal_handler(int m)
 //}
 
 
+
+void filterHomography(struct Object& o, struct Target& t,
+                      std::vector<cv::DMatch>& m) {
+    std::vector<cv::Point2f> src(m.size());
+    std::vector<cv::Point2f> dst(m.size());
+    for(int i = 0; i < m.size(); ++i) {
+        src[i] = t.object.keypoint[m[i].trainIdx].pt;
+        dst[i] = o.keypoint[m[i].queryIdx].pt;
+    }
+
+    std::vector<unsigned char> inliersMask(src.size());
+    float reprojectionThreshold = 1.0;
+    cv::findHomography(src,dst,
+                       CV_FM_RANSAC,
+                       reprojectionThreshold,
+                       inliersMask);
+
+    std::vector<cv::DMatch> inliers;
+    for (size_t i=0; i<inliersMask.size(); ++i) {
+        if (inliersMask[i])
+            inliers.push_back(m[i]);
+    }
+    m.swap(inliers);
+}
+
+void matchFilter(std::vector<cv::DMatch>& m) {
+    sort(m.begin(), m.end());  //筛选匹配点
+    float min_dist, max_dist;
+    min_dist = m[0].distance;
+    max_dist = m[m.size() - 1].distance;
+    for(int i = (m.size() - 1); i >= 0; --i) {
+        if(m[i].distance > (0.7 * max_dist)) {
+            m.pop_back();
+        } else {
+            break;
+        }
+    }
+}
+
+bool Redetect(std::vector<struct Object>& objs, struct Target& targ) {
+    //instantiate detectors/matchers
+    SURFDetector surf;
+    //    SURFMatcher<cv::FlannBasedMatcher> matcher;
+    //    SURFMatcher<cv::BFMatcher> matcher;
+    cv::BFMatcher matcher(cv::NORM_L2, true);
+    int tmpnum = -1;
+    int tmpsize = 31;
+    char buffer[100];
+    char buffer2[100];
+    surf(targ.object.sample, cv::UMat(),
+         targ.object.keypoint, targ.object.descriptor);
+    std::cout << "target.keypoint: " << targ.object.keypoint.size() << std::endl;
+
+    for(int i = 0; i < objects.size(); ++i) {
+        if(targ.object.id == objs[i].id) {
+            surf(objs[i].sample, cv::UMat(),
+                 objs[i].keypoint, objs[i].descriptor);
+
+            matcher.match(targ.object.descriptor, objs[i].descriptor,
+                          objs[i].matchs);
+            matchFilter(objs[i].matchs);
+            //filterHomography(objects[i], target, objects[i].matchs);
+            cv::Mat m[4];
+            std::cout << "i= " << i << "; obj.matchs= " << objs[i].matchs.size() << std::endl;
+            sprintf(buffer, "obj:%d", i);
+            cv::drawMatches(targ.object.sample, targ.object.keypoint,
+                            objs[i].sample, objs[i].keypoint, objs[i].matchs,
+                            m[i],cv::Scalar::all(-1));
+            cv::imshow(buffer, m[i]);
+            if(objs[i].matchs.size() > tmpsize) {
+                tmpsize = objs[i].matchs.size();
+                tmpnum = i;
+            }
+            sprintf(buffer2, "obj%d.jpg", i);
+            cv::imwrite(buffer2, objects[i].sample);
+            float sum;
+            for(int j = 0; j < objs[i].matchs.size(); ++j) {
+                std::cout << j << ": " << objs[i].matchs[j].distance << std::endl;
+                sum += objs[i].matchs[j].distance;
+            }
+            std::cout << "result: " << sum << "; ave: " << sum/(objs[i].matchs.size()) << std::endl;
+            std::cout << std::endl;
+        }
+    }
+    cv::imwrite("sample.jpg", targ.object.sample);
+//    if(tmpnum >= 0) {
+//        targ.object = objs[tmpnum];
+//        return true;
+//    }
+
+    return false;
+}
+
+bool Redetect(struct Target& targ, cv::UMat refSample) {
+    cv::UMat descriptor;
+    std::vector<cv::KeyPoint> keypoint;
+    //instantiate detectors/matchers
+    SURFDetector surf;
+    cv::BFMatcher matcher(cv::NORM_L2, true);
+
+    surf(targ.object.sample, cv::UMat(),
+         targ.object.keypoint, targ.object.descriptor);
+    surf(refSample, cv::UMat(), keypoint, descriptor);
+    matcher.match(targ.object.descriptor, descriptor,
+                  targ.object.matchs);
+    matchFilter(targ.object.matchs);
+
+    for(int i = 0; i < targ.object.matchs.size(); ++i) {
+        targ.object.match_sum =+ targ.object.matchs[i].distance;
+    }
+    targ.object.match_avg = targ.object.match_sum / targ.object.matchs.size();
+
+    cv::Mat m;
+    cv::drawMatches(targ.object.sample, targ.object.keypoint,
+                    refSample, keypoint, targ.object.matchs,
+                    m,cv::Scalar::all(-1));
+    cv::imshow("sample_match", m);
+
+    std::cout << "sum: " << targ.object.match_sum << "; avg: " << targ.object.match_avg << std::endl;
+
+    return true;
+}
 
 
 int main(int argc, char** argv) {
@@ -391,7 +513,6 @@ int main(int argc, char** argv) {
     //    capture.open("/home/vmt-nuc/Videos/outfile.avi");
     cv::Mat frame, prev_frame;
     cv::Ptr<cv::Tracker> tracker = cv::TrackerKCF::create();
-    //    cv::Ptr<cv::Tracker> tracker = cv::TrackerKCF::create();
     cv::namedWindow("video", 1);
     cv::setMouseCallback("video", onMouse, reinterpret_cast<void*> (&frame));
 
@@ -413,15 +534,10 @@ int main(int argc, char** argv) {
 //        Timer detect_timer;
 //        detect_timer.Start();
 //        double timeUsed;
-
-        double start = static_cast<double>(cv::getTickCount());
         if(flag.detect) {
             std::cout << "detect" << std::endl;
             frame.copyTo(prev_frame);
             detector.Detect(frame);
-
-            double end1 = (static_cast<double>(cv::getTickCount()) - start)/cv::getTickFrequency();
-            std::cout << "detect time: " << end1*1000 << std::endl;
 
             if(flag.click) {
                 std::cout << "click" << std::endl;
@@ -440,29 +556,45 @@ int main(int argc, char** argv) {
                 flag.click = false;
             }
 
-            double end2 = (static_cast<double>(cv::getTickCount()) - start)/cv::getTickFrequency();
-            std::cout << "end2 time: " << end2*1000 << std::endl;
-
-            double refstart = static_cast<double>(cv::getTickCount());
             if(flag.refresh) {
                 std::cout << "refresh" << std::endl;
                 for(int i = 0; i < objects.size(); ++i) {
                     if(target.object.id == objects[i].id) {
-                        std::cout << "roi: " << target.object.roi.size() << std::endl;
                         cv::Mat tmp1;//(target.object.sample.size(),
                                      //target.object.sample.type());
                         cv::Mat tmp2;
+
+                        if(target.object.roi.x < 0) {
+                            target.object.roi.width += target.object.roi.x;
+                            target.object.roi.x = 0;
+                        }
+                        if((target.object.roi.x + target.object.roi.width) > 640) {
+                            target.object.roi.width = 640 - target.object.roi.x;
+                        }
+                        if(target.object.roi.y < 0) {
+                            target.object.roi.height =+ target.object.roi.y;
+                            target.object.roi.y = 0;
+                        }
+                        if((target.object.roi.y + target.object.roi.height) > 480) {
+                            target.object.roi.height = 480 - target.object.roi.y;
+                        }
+
+//                        if(target.object.roi.x < 0 || target.object.roi.x >640 ||
+//                           target.object.roi.y < 0 || target.object.roi.y > 480) {
+//
+//                            target.object.roi.x = std::max(0, (int)(target.object.roi.x));
+//                            target.object.roi.x = std::min(target.refSample.cols, (int)(target.object.roi.x));
+//                            target.object.roi.y = std::max(0, (int)(target.object.roi.y));
+//                            target.object.roi.y = std::max(target.refSample.rows, (int)(target.object.roi.y));
+//                        }
+
                         cv::resize(objects[i].sample, tmp1,
                                    target.object.roi.size(), 0, 0);
-                        target.refSample.copyTo(tmp2);
-                        if(target.object.roi.x < 0 || target.object.roi.x >640 ||
-                           target.object.roi.y < 0 || target.object.roi.y > 480) {
-                            target.object.roi.x = std::max(0, (int)(target.object.roi.x));
-                            target.object.roi.x = std::min(target.refSample.cols, (int)(target.object.roi.x));
-                            target.object.roi.y = std::max(0, (int)(target.object.roi.y));
-                            target.object.roi.y = std::max(target.refSample.rows, (int)(target.object.roi.y));
-                        }
+
+                        target.refSample. copyTo(tmp2);
+
                         tmp1.copyTo(tmp2(target.object.roi));
+
                         //                        cv::imshow("replace", tmp2);
 
                         bool ret = tracker->update(tmp2, target.object.roi);
@@ -478,20 +610,22 @@ int main(int argc, char** argv) {
                         }
                     }
                 }
+/////                if(Redetect(objects, target)) {
+/////                    if(flag.isInit) {
+/////                        tracker = cv::TrackerKCF::create();
+/////                    }
+/////                    tracker->init(prev_frame, target.object.roi);
+/////                    flag.detect = false;
+/////                }
+/////                //                flag.refresh = false;
             }
-            double refend = (static_cast<double>(cv::getTickCount()) - refstart)/cv::getTickFrequency();
-            std::cout << "refend time: " << refend*1000 << std::endl;
-
             cv::putText(frame, "Detecting", cvPoint(0, 10),
                         cv::FONT_HERSHEY_PLAIN, 1.0f, cv::Scalar(0, 0, 255));
-
-            double end3 = (static_cast<double>(cv::getTickCount()) - start)/cv::getTickFrequency();
-            std::cout << "end3 time: " << end3*1000 << std::endl;
         } else {
             std::cout << "tracking" << std::endl;
             flag.isFound = tracker->update(frame, target.object.roi);
             if(!flag.isFound) {
-                cv::imshow("refsample", target.refSample);
+                //                cv::imshow("refsample", target.refSample);
                 flag.refresh = true;
                 flag.detect = true;
             } else {
@@ -508,14 +642,11 @@ int main(int argc, char** argv) {
 //     timeUsed = detect_timer.MilliSeconds();
 //     out << "the first detect time=" << timeUsed <<"ms\n";
 
-        double end = (static_cast<double>(cv::getTickCount()) - start)/cv::getTickFrequency();
-        std::cout << "whole time: " << end*1000 << std::endl;
-
      cv::imwrite(filenameout, frame);
      cv::imshow("video", frame);
-     if(!target.object.sample.empty())
-         cv::imshow("target", target.object.sample.getMat(cv::ACCESS_FAST));
-     if(cv::waitKey(1)==27)
+//     if(!target.object.sample.empty())
+//         cv::imshow("target", target.object.sample.getMat(cv::ACCESS_FAST));
+     if(cv::waitKey(50)==27)
          break;
     }
 
